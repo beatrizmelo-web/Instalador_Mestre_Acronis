@@ -1,30 +1,24 @@
 <#
 .SYNOPSIS
-    SCRIPT 02: INSTALADOR DINÂMICO VIA GITHUB
-    O Token é puxado automaticamente do Custom Field do Cliente no Atera.
+    SCRIPT 02 - INSTALADOR ACRONIS VIA GITHUB
+    Recebe o CustomerToken do script leve do Atera, baixa os arquivos,
+    instala o agente e registra no tenant correto.
 #>
 
 param (
-    [string]$CustomerToken = ""
+    [Parameter(Mandatory = $true)]
+    [string]$CustomerToken
 )
 
-# --- 1. VALIDAÇÃO DO TOKEN ---
-if ([string]::IsNullOrWhiteSpace($CustomerToken) -or $CustomerToken -eq "{{AcronisToken}}") {
-    Write-Host "[ERRO] Token não identificado. Verifique o Custom Field no Atera." -ForegroundColor Red
-    exit
-}
-
-# --- 2. CONFIGURAÇÃO DE AMBIENTE ---
 $BaseUrl  = "https://github.com/beatrizmelo-web/Instalador_Mestre_Acronis/releases/download/v1.0"
-$urlCloud = "https://br02-cloud.acronis.com"
-$dir      = "C:\Windows\Temp\AcronisInstaller"
-$exe      = "C:\Program Files\BackupClient\RegisterAgentTool\register_agent.exe"
+$UrlCloud = "https://br02-cloud.acronis.com"
+$Dir      = "C:\Windows\Temp\AcronisInstaller"
+$MsiFile  = Join-Path $Dir "BackupClient64.msi"
+$MstFile  = Join-Path $Dir "BackupClient64.msi.mst"
+$RegExe   = "C:\Program Files\BackupClient\RegisterAgentTool\register_agent.exe"
 
-Write-Host "[I] Iniciando instalação para o Token: $CustomerToken" -ForegroundColor Cyan
-
-# --- 3. LISTA DE ARQUIVOS PARA DOWNLOAD ---
 $FilesToDownload = @(
-    "BackupClient64.msi", "BackupClient64.msi.mst", 
+    "BackupClient64.msi", "BackupClient64.msi.mst",
     "bc647.cab", "bc648.cab", "bc649.cab", "bc6410.cab", "bc6411.cab", "bc6412.cab", "bc6413.cab", "bc6414.cab", "bc6415.cab",
     "bc6420.cab", "bc6421.cab", "bc6423.cab", "bc6424.cab", "bc6425.cab", "bc6426.cab", "bc6427.cab", "bc6428.cab", "bc6429.cab",
     "bc6430.cab", "bc6431.cab", "bc6432.cab", "bc6433.cab", "bc6434.cab", "bc6435.cab",
@@ -32,45 +26,70 @@ $FilesToDownload = @(
     "bc6450.cab", "bc6454.cab", "bc6455.cab"
 )
 
-# --- 4. PROCESSO DE DOWNLOAD ---
-if (!(Test-Path $dir)) { 
-    New-Item -ItemType Directory -Path $dir | Out-Null 
-}
+try {
+    if ([string]::IsNullOrWhiteSpace($CustomerToken)) {
+        throw "CustomerToken não recebido."
+    }
 
-Write-Host "--- Verificando arquivos no GitHub ---" -ForegroundColor Cyan
-foreach ($file in $FilesToDownload) {
-    $target = Join-Path $dir $file
-    if (!(Test-Path $target)) {
-        Write-Host "Baixando: $file..." -ForegroundColor Gray
-        try {
-            Invoke-WebRequest -Uri "$BaseUrl/$file" -OutFile $target -MaximumRedirection 5 -ErrorAction Stop
-        } catch {
-            Write-Host "[ERRO CRÍTICO] Falha ao baixar $file. Verifique a conexão." -ForegroundColor Red
-            exit
+    Write-Host "[I] Iniciando instalação do Acronis..." -ForegroundColor Cyan
+
+    if (-not (Test-Path $Dir)) {
+        New-Item -Path $Dir -ItemType Directory -Force | Out-Null
+    }
+
+    foreach ($File in $FilesToDownload) {
+        $Target = Join-Path $Dir $File
+        if (-not (Test-Path $Target)) {
+            Write-Host "[I] Baixando $File..." -ForegroundColor Gray
+            Invoke-WebRequest -Uri "$BaseUrl/$File" -OutFile $Target -MaximumRedirection 5 -UseBasicParsing -ErrorAction Stop
         }
     }
-}
 
-# --- 5. INSTALAÇÃO SILENCIOSA ---
-Write-Host "--- Iniciando Instalação MSI ---" -ForegroundColor Cyan
-$msiFile = "$dir\BackupClient64.msi"
-$mstFile = "$dir\BackupClient64.msi.mst"
-
-$p = Start-Process "msiexec.exe" -ArgumentList "/i `"$msiFile`" TRANSFORMS=`"$mstFile`" /qn /norestart" -Wait -PassThru
-
-# --- 6. REGISTRO NO PAINEL ---
-if ($p.ExitCode -in 0, 3010) {
-    Write-Host "Instalação concluída. Aguardando serviços (20s)..." -ForegroundColor Gray
-    Start-Sleep -Seconds 20
-    
-    if (Test-Path $exe) {
-        # USA O TOKEN QUE VEIO DO PARÂMETRO
-        $res = & $exe -o register -t cloud -a $urlCloud --token $CustomerToken
-        Write-Host "RESULTADO DO REGISTRO: $res" -ForegroundColor Green
-    } else {
-        Write-Host "[ERRO] Ferramenta de registro não encontrada em: $exe" -ForegroundColor Red
+    if (-not (Test-Path $MsiFile)) {
+        throw "MSI não encontrado: $MsiFile"
     }
-} else {
-    Write-Host "[ERRO] O instalador MSI retornou erro: $($p.ExitCode)" -ForegroundColor Red
-    Write-Host "Dica: Tente rodar o script 01 de LIMPEZA novamente." -ForegroundColor Yellow
+
+    if (-not (Test-Path $MstFile)) {
+        throw "MST não encontrado: $MstFile"
+    }
+
+    Write-Host "[I] Executando instalação silenciosa..." -ForegroundColor Cyan
+    $Install = Start-Process -FilePath "msiexec.exe" `
+        -ArgumentList "/i `"$MsiFile`" TRANSFORMS=`"$MstFile`" /qn /norestart" `
+        -Wait -PassThru
+
+    if ($Install.ExitCode -notin 0,3010) {
+        throw "O MSI retornou código $($Install.ExitCode)."
+    }
+
+    Write-Host "[I] Instalação concluída. Aguardando serviços..." -ForegroundColor Cyan
+    Start-Sleep -Seconds 20
+
+    if (-not (Test-Path $RegExe)) {
+        throw "Ferramenta de registro não encontrada em: $RegExe"
+    }
+
+    Write-Host "[I] Registrando agente no tenant do cliente..." -ForegroundColor Cyan
+    $Register = Start-Process -FilePath $RegExe `
+        -ArgumentList "-o register -t cloud -a $UrlCloud --token $CustomerToken" `
+        -Wait -PassThru -NoNewWindow
+
+    if ($Register.ExitCode -ne 0) {
+        throw "Falha no registro do agente. ExitCode: $($Register.ExitCode)"
+    }
+
+    Start-Sleep -Seconds 10
+
+    $BackupService = Get-Service -Name "MMS" -ErrorAction SilentlyContinue
+    if ($BackupService -and $BackupService.Status -eq "Running") {
+        Write-Host "[SUCESSO] Acronis instalado, registrado e em execução." -ForegroundColor Green
+        exit 0
+    }
+
+    Write-Host "[AVISO] Registro concluído, mas não consegui confirmar o serviço MMS em execução." -ForegroundColor Yellow
+    exit 0
+}
+catch {
+    Write-Host "[ERRO] $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
 }
